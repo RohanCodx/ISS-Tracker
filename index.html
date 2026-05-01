@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ISS traker from RohanCodx</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root { --glow: #f5fbfc; --panel-bg: rgba(11, 13, 23, 0.95); }
+        body, html { margin: 0; padding: 0; height: 100%; background: #000; color: white; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; overflow: hidden; }
+        
+        #map { height: 100vh; width: 100vw; z-index: 1; }
+        .leaflet-marker-icon { transition: transform 1s linear !important; }
+        #dashboard {
+            position: absolute;
+            z-index: 1000;
+            background: var(--panel-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(14, 21, 22, 0.3);
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            padding: 15px;
+            transition: all 0.3s ease;
+        }
+        @media (max-width: 768px) {
+            #dashboard {
+                bottom: 0; left: 0; right: 0;
+                border-radius: 20px 20px 0 0;
+                padding-bottom: env(safe-area-inset-bottom); 
+            }
+        }
+        @media (min-width: 769px) {
+            #dashboard {
+                top: 20px; right: 20px;
+                width: 280px;
+                border-radius: 12px;
+                grid-template-columns: 1fr;
+            }
+        }
+        .stat-box { border-left: 2px solid var(--glow); padding-left: 10px; }
+        .label { font-size: 10px; text-transform: uppercase; color: var(--glow); letter-spacing: 1px; }
+        .value { font-size: 16px; font-weight: bold; font-family: monospace; }
+
+        .iss-icon { font-size: 32px; filter: drop-shadow(0 0 8px var(--glow)); }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div id="dashboard">
+        <div class="value">------RohanCodx------></div>
+        <div class="stat-box" style="grid-column: span 2;">
+            <div class="label">Current Position</div>
+            <div class="value" id="coords">Calculating...</div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Velocity</div>
+            <div class="value"><span id="speed">0</span> <small>km/h</small></div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Altitude</div>
+            <div class="value"><span id="alt">0</span> <small>km</small></div>
+        </div>
+        <div class="stat-box" style="grid-column: span 2;">
+            <div class="label">Visibility</div>
+            <div class="value" id="visibility">---</div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.0.0/satellite.min.js"></script>
+
+    <script>
+        const map = L.map('map', {
+            zoomControl: false,
+            minZoom: 2,
+            maxBounds: [[-90, -180], [90, 180]],
+            maxBoundsViscosity: 1.0
+        }).setView([0, 0], 3);
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            noWrap: true,
+            bounds: [[-90, -180], [90, 180]]
+        }).addTo(map);
+
+        const predictLine = L.polyline([], {color: '#00e5ff', weight: 2, dashArray: '5, 10', opacity: 0.8}).addTo(map);
+        const issIcon = L.divIcon({ className: 'iss-icon', html: '🛰️', iconSize: [32, 32], iconAnchor: [16, 16] });
+        let marker = L.marker([0, 0], {icon: issIcon}).addTo(map);
+        let isFirstLoad = true;
+
+        function updatePrediction(tle1, tle2, currentLon) {
+            const satrec = satellite.twoline2satrec(tle1, tle2);
+            const futurePoints = [];
+            const now = new Date();
+
+            const isMovingEast = true; 
+
+            for (let i = 0; i < 90; i += 1) {
+                const time = new Date(now.getTime() + i * 60000);
+                const pos = satellite.propagate(satrec, time);
+                const gmst = satellite.gstime(time);
+                const posGd = satellite.eciToGeodetic(pos.position, gmst);
+                
+                const lat = satellite.degreesLat(posGd.latitude);
+                const lon = satellite.degreesLong(posGd.longitude);
+
+                if (futurePoints.length > 0) {
+                    const lastLon = futurePoints[futurePoints.length - 1][1];
+                    if (Math.abs(lon - lastLon) > 100) break; 
+                }
+                
+                futurePoints.push([lat, lon]);
+            }
+            predictLine.setLatLngs(futurePoints);
+        }
+
+        // 4. Live Update Loop
+        async function update() {
+            try {
+                const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
+                const data = await res.json();
+                const pos = [data.latitude, data.longitude];
+
+                // Update UI
+                document.getElementById('coords').innerText = `${data.latitude.toFixed(3)}°, ${data.longitude.toFixed(3)}°`;
+                document.getElementById('speed').innerText = Math.round(data.velocity).toLocaleString();
+                document.getElementById('alt').innerText = Math.round(data.altitude);
+                document.getElementById('visibility').innerText = data.visibility.toUpperCase();
+
+                // Move Marker
+                marker.setLatLng(pos);
+
+                if (isFirstLoad) {
+                    map.setView(pos, 3);
+                    isFirstLoad = false;
+                }
+
+                // Get TLE for prediction path
+                const tleRes = await fetch('https://api.wheretheiss.at/v1/satellites/25544/tles');
+                const tle = await tleRes.json();
+                updatePrediction(tle.line1, tle.line2, data.longitude);
+
+            } catch (e) { console.log("Updating..."); }
+        }
+
+        setInterval(update, 2000);
+        update();
+    </script>
+</body>
+</html>
