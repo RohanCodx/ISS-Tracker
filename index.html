@@ -115,8 +115,6 @@
             }
             predictLine.setLatLngs(futurePoints);
         }
-
-        // 4. Live Update Loop
         async function update() {
             try {
                 const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
@@ -129,7 +127,6 @@
                 document.getElementById('alt').innerText = Math.round(data.altitude);
                 document.getElementById('visibility').innerText = data.visibility.toUpperCase();
 
-                // Move Marker
                 marker.setLatLng(pos);
 
                 if (isFirstLoad) {
@@ -137,7 +134,6 @@
                     isFirstLoad = false;
                 }
 
-                // Get TLE for prediction path
                 const tleRes = await fetch('https://api.wheretheiss.at/v1/satellites/25544/tles');
                 const tle = await tleRes.json();
                 updatePrediction(tle.line1, tle.line2, data.longitude);
