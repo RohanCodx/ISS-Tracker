@@ -33,10 +33,6 @@ The project fetches real-time ISS location data using a public API and updates i
 1. Download or clone this repository
 2. Open `index.html` in your browser
 
-OR
-
-Just open the live demo link 👆
-
 ---
 
 ## 🤝 Contributing
