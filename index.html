@@ -22,12 +22,19 @@
             gap: 10px;
             padding: 15px;
             transition: all 0.3s ease;
+            max-height: 90vh;
+            overflow-y: auto;
         }
         @media (max-width: 768px) {
             #dashboard {
                 bottom: 0; left: 0; right: 0;
                 border-radius: 20px 20px 0 0;
-                padding-bottom: env(safe-area-inset-bottom); 
+                padding-bottom: env(safe-area-inset-bottom);
+                max-height: 70vh;
+                transform: translateY(100%);
+            }
+            #dashboard.open {
+                transform: translateY(0);
             }
         }
         @media (min-width: 769px) {
@@ -43,6 +50,53 @@
         .value { font-size: 16px; font-weight: bold; font-family: monospace; }
 
         .iss-icon { font-size: 32px; filter: drop-shadow(0 0 8px var(--glow)); }
+
+        #liveBtn {
+            grid-column: span 2;
+            background: rgba(245, 251, 252, 0.08);
+            border: 1px solid rgba(245, 251, 252, 0.3);
+            color: white;
+            font-family: inherit;
+            font-size: 12px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 8px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        #liveBtn:hover { background: rgba(245, 251, 252, 0.16); }
+
+        #liveWrap {
+            grid-column: span 2;
+            overflow: hidden;
+            max-height: 0;
+            transition: max-height 0.3s ease;
+            border-radius: 8px;
+        }
+        #liveWrap.open { max-height: 200px; }
+        #liveInner { position: relative; width: 100%; padding-top: 56.25%; background: #000; border-radius: 8px; overflow: hidden; }
+        #liveInner iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+
+        #iss-timer {
+            grid-column: span 2;
+            font-size: 12px;
+            line-height: 1.5;
+            border-top: 1px solid rgba(245, 251, 252, 0.2);
+            padding-top: 10px;
+        }
+        .leaflet-control-zoom {
+            border: 1px solid rgba(245, 251, 252, 0.3) !important;
+            border-radius: 8px !important;
+            overflow: hidden;
+        }
+        .leaflet-control-zoom a {
+            background: var(--panel-bg) !important;
+            color: var(--glow) !important;
+            border: none !important;
+        }
+        .leaflet-control-zoom a:hover {
+            background: rgba(245, 251, 252, 0.16) !important;
+        }
     </style>
 </head>
 <body>
@@ -67,6 +121,31 @@
             <div class="label">Visibility</div>
             <div class="value" id="visibility">---</div>
         </div>
+        <div class="stat-box">
+            <div class="label">Orbital Period</div>
+            <div class="value"><span id="period">--</span> <small>min</small></div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Inclination</div>
+            <div class="value"><span id="incl">--</span> <small>°</small></div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Orbits Today</div>
+            <div class="value"><span id="orbits">--</span> <small>/day</small></div>
+        </div>
+        <div class="stat-box">
+            <div class="label">Horizon Radius</div>
+            <div class="value"><span id="footprint">--</span> <small>km</small></div>
+        </div>
+
+        <button id="liveBtn">Live View</button>
+        <div id="liveWrap">
+            <div id="liveInner"></div>
+        </div>
+
+        <div id="iss-timer">
+          ISS Remaining Time: Loading...
+        </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -75,46 +154,98 @@
     <script>
         const map = L.map('map', {
             zoomControl: false,
-            minZoom: 2,
+            minZoom: window.innerWidth < 768 ? 3 : 2,
             maxBounds: [[-90, -180], [90, 180]],
             maxBoundsViscosity: 1.0
         }).setView([0, 0], 3);
 
-        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        L.control.zoom({ position: 'topleft' }).addTo(map);
+
+        // CARTO's free raster basemaps (basemaps.cartocdn.com) started requiring
+        // an API key in late Aug 2026 — anonymous requests now render an
+        // "API KEY REQUIRED" watermark instead of the tile. Esri's dark gray
+        // canvas basemap is free and keyless, so we use that instead.
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', {
             noWrap: true,
-            bounds: [[-90, -180], [90, 180]]
+            bounds: [[-90, -180], [90, 180]],
+            attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
         }).addTo(map);
 
         const predictLine = L.polyline([], {color: '#00e5ff', weight: 2, dashArray: '5, 10', opacity: 0.8}).addTo(map);
+        const pastLine = L.polyline([], {color: '#ff9f43', weight: 2, dashArray: '2, 8', opacity: 0.6}).addTo(map);
         const issIcon = L.divIcon({ className: 'iss-icon', html: '🛰️', iconSize: [32, 32], iconAnchor: [16, 16] });
         let marker = L.marker([0, 0], {icon: issIcon}).addTo(map);
         let isFirstLoad = true;
+        const EARTH_R = 6371;
+
+        // Mobile: dashboard starts collapsed to a small handle bar.
+        // Tapping the ISS marker toggles it open; tapping the map closes it.
+        const dashboard = document.getElementById('dashboard');
+        marker.on('click', (e) => {
+            if (window.innerWidth < 768) {
+                L.DomEvent.stopPropagation(e);
+                dashboard.classList.toggle('open');
+            }
+        });
+        map.on('click', () => {
+            if (window.innerWidth < 768) {
+                dashboard.classList.remove('open');
+            }
+        });
 
         function updatePrediction(tle1, tle2, currentLon) {
             const satrec = satellite.twoline2satrec(tle1, tle2);
-            const futurePoints = [];
             const now = new Date();
 
-            const isMovingEast = true; 
-
+            // Forward (future) track
+            const futurePoints = [];
             for (let i = 0; i < 90; i += 1) {
                 const time = new Date(now.getTime() + i * 60000);
                 const pos = satellite.propagate(satrec, time);
+                if (!pos || !pos.position) continue;
                 const gmst = satellite.gstime(time);
                 const posGd = satellite.eciToGeodetic(pos.position, gmst);
-                
+
                 const lat = satellite.degreesLat(posGd.latitude);
                 const lon = satellite.degreesLong(posGd.longitude);
 
                 if (futurePoints.length > 0) {
                     const lastLon = futurePoints[futurePoints.length - 1][1];
-                    if (Math.abs(lon - lastLon) > 100) break; 
+                    if (Math.abs(lon - lastLon) > 100) break;
                 }
-                
+
                 futurePoints.push([lat, lon]);
             }
             predictLine.setLatLngs(futurePoints);
+
+            // Backward (past) track — where the ISS has already flown
+            const pastPoints = [];
+            for (let i = 0; i < 90; i += 1) {
+                const time = new Date(now.getTime() - i * 60000);
+                const pos = satellite.propagate(satrec, time);
+                if (!pos || !pos.position) continue;
+                const gmst = satellite.gstime(time);
+                const posGd = satellite.eciToGeodetic(pos.position, gmst);
+
+                const lat = satellite.degreesLat(posGd.latitude);
+                const lon = satellite.degreesLong(posGd.longitude);
+
+                if (pastPoints.length > 0) {
+                    const lastLon = pastPoints[pastPoints.length - 1][1];
+                    if (Math.abs(lon - lastLon) > 100) break;
+                }
+
+                pastPoints.push([lat, lon]);
+            }
+            pastLine.setLatLngs(pastPoints);
+
+            // extra data derived from the same TLE
+            const periodMin = (2 * Math.PI) / satrec.no;
+            document.getElementById('period').innerText = periodMin.toFixed(1);
+            document.getElementById('incl').innerText = (satrec.inclo * (180 / Math.PI)).toFixed(1);
+            document.getElementById('orbits').innerText = (1440 / periodMin).toFixed(1);
         }
+
         async function update() {
             try {
                 const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
@@ -125,7 +256,10 @@
                 document.getElementById('coords').innerText = `${data.latitude.toFixed(3)}°, ${data.longitude.toFixed(3)}°`;
                 document.getElementById('speed').innerText = Math.round(data.velocity).toLocaleString();
                 document.getElementById('alt').innerText = Math.round(data.altitude);
-                document.getElementById('visibility').innerText = data.visibility.toUpperCase();
+                document.getElementById('visibility').innerText = (data.visibility || '---').toUpperCase();
+
+                const angRad = Math.acos(EARTH_R / (EARTH_R + data.altitude));
+                document.getElementById('footprint').innerText = Math.round(EARTH_R * angRad).toLocaleString();
 
                 marker.setLatLng(pos);
 
@@ -143,50 +277,81 @@
 
         setInterval(update, 2000);
         update();
+
+        // Live view toggle - loads the NASA stream only when opened
+        const liveBtn = document.getElementById('liveBtn');
+        const liveWrap = document.getElementById('liveWrap');
+        let liveLoaded = false;
+        liveBtn.addEventListener('click', () => {
+            const open = liveWrap.classList.toggle('open');
+            liveBtn.textContent = open ? 'Hide Live View' : 'Live View';
+            if (open && !liveLoaded) {
+                liveLoaded = true;
+                const liveInner = document.getElementById('liveInner');
+
+                // Error 153 usually means YouTube rejected the embed because the
+                // page's origin (or file:// with no origin at all) isn't allowed,
+                // or the referenced channel has no live stream running right now.
+                // Passing a proper origin + enablejsapi, and falling back to a
+                // plain link when the iframe fails, avoids a dead/broken embed.
+                const isFileProtocol = window.location.protocol === 'file:';
+                const origin = isFileProtocol ? '' : `&origin=${encodeURIComponent(window.location.origin)}`;
+                const channelUrl = 'https://www.youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ/live';
+
+                if (isFileProtocol) {
+                    // YouTube embeds reliably throw error 153 on file:// pages
+                    // (no valid origin to authorize), so skip straight to a link.
+                    liveInner.innerHTML =
+                        `<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;font-size:12px;">
+                            Live embeds don't work when this page is opened directly from a file.<br><br>
+                            <a href="${channelUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch NASA Live on YouTube ↗</a>
+                         </div>`;
+                    return;
+                }
+
+                const iframe = document.createElement('iframe');
+                iframe.title = 'NASA live stream';
+                iframe.allow = 'autoplay; encrypted-media; picture-in-picture';
+                iframe.allowFullscreen = true;
+                iframe.src = `https://www.youtube.com/embed/live_stream?channel=UCLA_DiR1FfKNvjuUpBHmylQ&autoplay=1&mute=1&enablejsapi=1${origin}`;
+
+                // If the embed itself errors out (e.g. channel isn't live, or
+                // still blocked for another reason), swap in a fallback link
+                // instead of leaving a broken black box.
+                iframe.addEventListener('error', () => {
+                    liveInner.innerHTML =
+                        `<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;font-size:12px;">
+                            Live stream unavailable right now.<br><br>
+                            <a href="${channelUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch NASA Live on YouTube ↗</a>
+                         </div>`;
+                });
+
+                liveInner.innerHTML = '';
+                liveInner.appendChild(iframe);
+            }
+        });
+
+        // ISS retirement countdown (kept from the original)
+        function updateTimer() {
+            const targetDate = new Date("January 1, 2030 00:00:00").getTime();
+            const now = new Date().getTime();
+            const diff = targetDate - now;
+
+            if (diff <= 0) {
+                document.getElementById("iss-timer").innerHTML = "ISS Mission Ended 🚀";
+                return;
+            }
+
+            const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+            const minutes = Math.floor((diff / (1000 * 60)) % 60);
+            const seconds = Math.floor((diff / 1000) % 60);
+
+            document.getElementById("iss-timer").innerHTML =
+              `ISS Remaining Time<br>${days}d ${hours}h ${minutes}m ${seconds}s`;
+        }
+        setInterval(updateTimer, 1000);
+        updateTimer();
     </script>
-</body>
-<body>
-
-<div id="iss-timer">
-  ISS Remaining Time: Loading...
-</div>
-
-<script>
-function updateTimer() {
-
-    // Target date = 1 January 2030
-    const targetDate = new Date("January 1, 2030 00:00:00").getTime();
-
-    // Current time
-    const now = new Date().getTime();
-
-    // Difference
-    const diff = targetDate - now;
-
-    // If countdown finished
-    if (diff <= 0) {
-        document.getElementById("iss-timer").innerHTML =
-        "ISS Mission Ended 🚀";
-        return;
-    }
-
-    // Time calculations
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-    const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
-    const minutes = Math.floor((diff / (1000 * 60)) % 60);
-    const seconds = Math.floor((diff / 1000) % 60);
-
-    // Show timer
-    document.getElementById("iss-timer").innerHTML =
-      `🚀 ISS Remaining Time<br>
-       ${days}d ${hours}h ${minutes}m ${seconds}s`;
-}
-
-// Update every second
-setInterval(updateTimer, 1000);
-
-updateTimer();
-</script>
-
 </body>
 </html>
