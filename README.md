@@ -2,6 +2,8 @@
 
 A simple and lightweight **2D ISS (International Space Station) Tracker** that shows the real-time position of the ISS on a world map 🌍.
 
+> The International Space Station (ISS) is planned to retire in 2030, after over 30 years of continuous human presence in orbit.
+
 Hear is a demo link---> 
 ```
 https://rohancodx.github.io/ISS-Tracker/
