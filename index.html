@@ -282,6 +282,18 @@
         const liveBtn = document.getElementById('liveBtn');
         const liveWrap = document.getElementById('liveWrap');
         let liveLoaded = false;
+        let ytPlayer = null;
+
+        function loadYouTubeAPI() {
+            return new Promise((resolve) => {
+                if (window.YT && window.YT.Player) { resolve(); return; }
+                const tag = document.createElement('script');
+                tag.src = 'https://www.youtube.com/iframe_api';
+                document.head.appendChild(tag);
+                window.onYouTubeIframeAPIReady = () => resolve();
+            });
+        }
+
         liveBtn.addEventListener('click', () => {
             const open = liveWrap.classList.toggle('open');
             liveBtn.textContent = open ? 'Hide Live View' : 'Live View';
@@ -292,42 +304,102 @@
                 // Error 153 usually means YouTube rejected the embed because the
                 // page's origin (or file:// with no origin at all) isn't allowed,
                 // or the referenced channel has no live stream running right now.
-                // Passing a proper origin + enablejsapi, and falling back to a
-                // plain link when the iframe fails, avoids a dead/broken embed.
                 const isFileProtocol = window.location.protocol === 'file:';
-                const origin = isFileProtocol ? '' : `&origin=${encodeURIComponent(window.location.origin)}`;
-                const channelUrl = 'https://www.youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ/live';
+                // NASA's main channel doesn't run a 24/7 broadcast anymore, so
+                // embed/live_stream?channel=... often has no active broadcast to
+                // redirect to and shows "Video unavailable." NASA instead runs a
+                // long-running dedicated ISS live-view video, which is far more
+                // reliably embeddable.
+                const issLiveVideoId = 'M3HKLzjvKPc';
+                const watchUrl = `https://www.youtube.com/watch?v=${issLiveVideoId}`;
 
                 if (isFileProtocol) {
                     // YouTube embeds reliably throw error 153 on file:// pages
                     // (no valid origin to authorize), so skip straight to a link.
                     liveInner.innerHTML =
                         `<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;font-size:12px;">
-                            Live embeds don't work when this page is opened directly from a file.<br><br>
-                            <a href="${channelUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch NASA Live on YouTube ↗</a>
+                            Live view doesn't work when this page is opened directly from a file.<br><br>
+                            <a href="${watchUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch ISS Live ↗</a>
                          </div>`;
                     return;
                 }
 
-                const iframe = document.createElement('iframe');
-                iframe.title = 'NASA live stream';
-                iframe.allow = 'autoplay; encrypted-media; picture-in-picture';
-                iframe.allowFullscreen = true;
-                iframe.src = `https://www.youtube.com/embed/live_stream?channel=UCLA_DiR1FfKNvjuUpBHmylQ&autoplay=1&mute=1&enablejsapi=1${origin}`;
+                // Build a bare player div + one custom play/pause button — no
+                // YouTube logo, title bar, related videos, or native controls.
+                // Notes:
+                // - We never call pauseVideo() on the real player — YouTube draws
+                //   its own title / "Watch on YouTube" overlay the moment a video
+                //   is actually paused, and that can't be suppressed via the API.
+                //   "Pause" just covers the video with a blank div while the
+                //   (muted) stream keeps playing silently underneath.
+                // - A transparent overlay sits on top of the iframe at all times
+                //   to intercept every hover/click before it reaches YouTube's
+                //   player — that hover is what triggers YouTube's own logo
+                //   overlay to appear, so blocking it stops the logo from
+                //   showing at all.
+                // - YouTube also auto-shows a title card for a few seconds right
+                //   after playback starts, regardless of hover. We cover the
+                //   video for the first few seconds after it starts to hide that.
+                liveInner.innerHTML =
+                    `<div id="ytPlayerHost" style="position:absolute;inset:0;"></div>
+                     <div id="issPauseCover" style="position:absolute;inset:0;z-index:1;background:#000;display:block;"></div>
+                     <div id="issHoverBlock" style="position:absolute;inset:0;z-index:1;background:transparent;cursor:pointer;"></div>
+                     <button id="issPlayPause" aria-label="Play/Pause"
+                       style="position:absolute;bottom:8px;left:8px;z-index:2;width:34px;height:34px;
+                              border-radius:50%;border:1px solid rgba(245,251,252,0.4);
+                              background:rgba(11,13,23,0.75);color:#fff;font-size:14px;
+                              display:flex;align-items:center;justify-content:center;cursor:pointer;">▶</button>`;
 
-                // If the embed itself errors out (e.g. channel isn't live, or
-                // still blocked for another reason), swap in a fallback link
-                // instead of leaving a broken black box.
-                iframe.addEventListener('error', () => {
-                    liveInner.innerHTML =
-                        `<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;font-size:12px;">
-                            Live stream unavailable right now.<br><br>
-                            <a href="${channelUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch NASA Live on YouTube ↗</a>
-                         </div>`;
+                loadYouTubeAPI().then(() => {
+                    ytPlayer = new YT.Player('ytPlayerHost', {
+                        videoId: issLiveVideoId,
+                        playerVars: {
+                            autoplay: 1,
+                            mute: 1,
+                            controls: 0,       // hide YouTube's own control bar
+                            modestbranding: 1,  // minimize the YouTube logo
+                            rel: 0,             // no related videos
+                            iv_load_policy: 3,  // no annotations
+                            fs: 0,              // no fullscreen button
+                            disablekb: 1,
+                            playsinline: 1,
+                            origin: window.location.origin
+                        },
+                        events: {
+                            onReady: (e) => {
+                                e.target.playVideo();
+                                // Let YouTube's own startup title card finish
+                                // showing and fade out underneath our cover
+                                // before revealing the video.
+                                setTimeout(() => {
+                                    const cover = document.getElementById('issPauseCover');
+                                    const btn = document.getElementById('issPlayPause');
+                                    if (cover) cover.style.display = 'none';
+                                    if (btn) btn.textContent = '❚❚';
+                                    showingCover = false;
+                                }, 4000);
+                            },
+                            onError: () => {
+                                liveInner.innerHTML =
+                                    `<div style="display:flex;align-items:center;justify-content:center;height:100%;padding:12px;text-align:center;font-size:12px;">
+                                        Live stream unavailable right now.<br><br>
+                                        <a href="${watchUrl}" target="_blank" rel="noopener" style="color:#00e5ff;">Watch ISS Live ↗</a>
+                                     </div>`;
+                            }
+                        }
+                    });
+
+                    let showingCover = true;
+                    const toggle = () => {
+                        const cover = document.getElementById('issPauseCover');
+                        const btn = document.getElementById('issPlayPause');
+                        showingCover = !showingCover;
+                        cover.style.display = showingCover ? 'block' : 'none';
+                        btn.textContent = showingCover ? '▶' : '❚❚';
+                    };
+                    document.getElementById('issPlayPause').addEventListener('click', toggle);
+                    document.getElementById('issHoverBlock').addEventListener('click', toggle);
                 });
-
-                liveInner.innerHTML = '';
-                liveInner.appendChild(iframe);
             }
         });
 
@@ -348,7 +420,7 @@
             const seconds = Math.floor((diff / 1000) % 60);
 
             document.getElementById("iss-timer").innerHTML =
-              `ISS Remaining Time<br>${days}d ${hours}h ${minutes}m ${seconds}s`;
+              `🚀 ISS Remaining Time<br>${days}d ${hours}h ${minutes}m ${seconds}s`;
         }
         setInterval(updateTimer, 1000);
         updateTimer();
